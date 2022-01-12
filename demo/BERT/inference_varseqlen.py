@@ -121,9 +121,16 @@ if __name__ == '__main__':
     handle = ctypes.CDLL("libnvinfer_plugin.so", mode=ctypes.RTLD_GLOBAL)
     if not handle:
         raise RuntimeError("Could not load plugin library. Is `libnvinfer_plugin.so` on your LD_LIBRARY_PATH?")
+    
+    # Import cuSPARSELt plugin for BERT TensorRT
+    handle = ctypes.CDLL("plugin/build/libspmmplugin.so", mode=ctypes.RTLD_GLOBAL)
+    if not handle:
+        raise RuntimeError("Could not load plugin library. Is `libspmmplugin.so` on your LD_LIBRARY_PATH?")
 
     # The first context created will use the 0th profile. A new context must be created
     # for each additional profile needed. Here, we only use batch size 1, thus we only need the first profile.
+    print_info = 0
+
     with open(args.engine, 'rb') as f, trt.Runtime(TRT_LOGGER) as runtime, \
         runtime.deserialize_cuda_engine(f.read()) as engine, engine.create_execution_context() as context:
 
@@ -145,6 +152,7 @@ if __name__ == '__main__':
 
         def inference(features, tokens):
             global h_output
+            global print_info
 
             _NetworkOutput = collections.namedtuple(  # pylint: disable=invalid-name
                     "NetworkOutput",
@@ -168,6 +176,12 @@ if __name__ == '__main__':
                     context.set_binding_shape(2, (2,))
                 if context.get_binding_shape(3)[0] != S:
                     context.set_binding_shape(3, (S,))
+
+                if print_info == 1:
+                    inspector = engine.create_engine_inspector()
+                    inspector.execution_context = context
+                    print(inspector.get_engine_information(trt.LayerInformationFormat.ONELINE))
+                print_info = print_info + 1
 
                 h_input_ids = cuda.register_host_memory(np.ascontiguousarray(input_ids.ravel()))
                 h_segment_ids = cuda.register_host_memory(np.ascontiguousarray(segment_ids.ravel()))

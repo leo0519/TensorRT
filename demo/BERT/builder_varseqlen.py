@@ -44,6 +44,11 @@ handle = ctypes.CDLL("libnvinfer_plugin.so", mode=ctypes.RTLD_GLOBAL)
 if not handle:
     raise RuntimeError("Could not load plugin library. Is `libnvinfer_plugin.so` on your LD_LIBRARY_PATH?")
 
+# Load SpmmPluginDynamic plugin
+handle = ctypes.CDLL("plugin/build/libspmmplugin.so", mode=ctypes.RTLD_GLOBAL)
+if not handle:
+    raise RuntimeError("Could not load plugin library. Is `libspmmplugin.so` on your LD_LIBRARY_PATH?")
+
 trt.init_libnvinfer_plugins(TRT_LOGGER, "")
 plg_registry = trt.get_plugin_registry()
 emln_plg_creator2 = plg_registry.get_plugin_creator("CustomEmbLayerNormPluginDynamic", "2", "")
@@ -57,8 +62,24 @@ skln_plg_creator3 = plg_registry.get_plugin_creator("CustomSkipLayerNormPluginDy
 emln_plg_creator3 = plg_registry.get_plugin_creator("CustomEmbLayerNormPluginDynamic", "3", "")
 skln_plg_creator4 = plg_registry.get_plugin_creator("CustomSkipLayerNormPluginDynamic", "4", "")
 
+# cuSPARSELt Plugin
+spmm_plg_creator1 = plg_registry.get_plugin_creator("CustomSpmmPluginDynamic", "1", "")
+
+def get_spmm_plugin(out_dim, weight, bias, activation):
+    spmm_plug = None
+    dtype = trt.DataType.INT8
+    pf_type = trt.PluginField("type_id", np.array([int(dtype)], np.int32), trt.PluginFieldType.INT32)
+    pf_out_dim = trt.PluginField("out_dim", np.array([out_dim], np.int32), trt.PluginFieldType.INT32)
+    pf_weight = trt.PluginField("weight", weight.numpy(), trt.PluginFieldType.FLOAT32)
+    pf_bias = trt.PluginField("bias", bias.numpy(), trt.PluginFieldType.FLOAT32)
+    pf_activation = trt.PluginField("activation_id", np.array([activation], np.int32), trt.PluginFieldType.INT32)
+    pfc = trt.PluginFieldCollection([pf_type, pf_out_dim, pf_weight, pf_bias, pf_activation])
+    spmm_plug = spmm_plg_creator1.create_plugin("spmm", pfc)
+    assert(spmm_plug is not None)
+    return spmm_plug
+
 class BertConfig:
-    def __init__(self, bert_config_path, use_fp16, use_int8, use_qat, interleaved, timing_cache, use_sparsity, use_megatron):
+    def __init__(self, bert_config_path, use_fp16, use_int8, use_qat, interleaved, timing_cache, use_sparsity, use_megatron, use_cusparselt=False, plugin_skip_ff1=True):
         with open(bert_config_path, "r") as f:
             data = json.load(f)
             self.num_attention_heads = data["num_attention_heads"]
@@ -73,6 +94,8 @@ class BertConfig:
             self.timing_cache = timing_cache
             self.use_sparsity = use_sparsity
             self.use_megatron = use_megatron
+            self.use_cusparselt = use_cusparselt
+            self.plugin_skip_ff1 = plugin_skip_ff1
 
     def get_trt_dtype(self):
         dtype = trt.float32
@@ -104,7 +127,15 @@ def attention_layer_opt(prefix, config, init_dict, network, input_tensor, mask_i
 
     # FC_attention
     if config.use_int8:
-        mult_all = network.add_convolution_nd(input_tensor, 3 * hidden_size, (1, 1), Wall, Ball)
+        if config.use_cusparselt:
+            mult_all_prev = network.add_shuffle(input_tensor)
+            mult_all_prev.second_transpose = (2, 1, 0, 3)
+            set_output_range(mult_all_prev, input_tensor.dynamic_range[1])
+            mult_all_mid = network.add_plugin_v2([mult_all_prev.get_output(0)], get_spmm_plugin(3 * hidden_size, Wall, Ball, 0))
+            mult_all = network.add_shuffle(mult_all_mid.get_output(0))
+            mult_all.second_transpose = (2, 1, 0, 3)
+        else:
+            mult_all = network.add_convolution_nd(input_tensor, 3 * hidden_size, (1, 1), Wall, Ball)
     else:
         mult_all = network.add_fully_connected(input_tensor, 3 * hidden_size, Wall, Ball)
 
@@ -114,6 +145,8 @@ def attention_layer_opt(prefix, config, init_dict, network, input_tensor, mask_i
             init_dict[prefix + 'self_qv_b_input_quantizer_amax'],
             init_dict[prefix + 'self_av_b_input_quantizer_amax'],
         )
+        if config.use_cusparselt:
+            set_output_range(mult_all_mid, dr_qkv)
         set_output_range(mult_all, dr_qkv)
     set_output_name(mult_all, prefix, "qkv_mult")
 
@@ -199,11 +232,21 @@ def transformer_layer_opt(prefix, config, init_dict, network, input_tensor, resi
     B_aout = init_dict[prefix + B_AOUT]
     W_aout = init_dict[prefix + W_AOUT]
     if config.use_int8:
-        attention_out_fc = network.add_convolution_nd(attention_heads, hidden_size, (1, 1), W_aout, B_aout)
+        if config.use_cusparselt:
+            attention_out_fc_prev = network.add_shuffle(attention_heads)
+            attention_out_fc_prev.second_transpose = (2, 1, 0, 3)
+            set_output_range(attention_out_fc_prev, attention_heads.dynamic_range[1])
+            attention_out_fc_mid = network.add_plugin_v2([attention_out_fc_prev.get_output(0)], get_spmm_plugin(hidden_size, W_aout, B_aout, 0))
+            attention_out_fc = network.add_shuffle(attention_out_fc_mid.get_output(0))
+            attention_out_fc.second_transpose = (2, 1, 0, 3)
+        else:
+            attention_out_fc = network.add_convolution_nd(attention_heads, hidden_size, (1, 1), W_aout, B_aout)
     else:
         attention_out_fc = network.add_fully_connected(attention_heads, hidden_size, W_aout, B_aout)
     if config.use_int8 and config.use_qat:
         dr_fc_aout = init_dict[prefix + 'attention_output_add_local_input_quantizer_amax']
+        if config.use_cusparselt:
+            set_output_range(attention_out_fc_mid, dr_fc_aout)
         set_output_range(attention_out_fc, dr_fc_aout)
 
     if config.use_megatron:
@@ -222,7 +265,15 @@ def transformer_layer_opt(prefix, config, init_dict, network, input_tensor, resi
     B_mid = init_dict[prefix + B_MID]
     W_mid = init_dict[prefix + W_MID]
     if config.use_int8:
-        mid_dense = network.add_convolution_nd(attention_ln, config.intermediate_size, (1, 1), W_mid, B_mid)
+        if config.use_cusparselt and not config.plugin_skip_ff1:
+            mid_dense_prev = network.add_shuffle(attention_ln)
+            mid_dense_prev.second_transpose = (2, 1, 0, 3)
+            set_output_range(mid_dense_prev, attention_ln.dynamic_range[1])
+            mid_dense_mid = network.add_plugin_v2([mid_dense_prev.get_output(0)], get_spmm_plugin(config.intermediate_size, W_mid, B_mid, 0))
+            mid_dense = network.add_shuffle(mid_dense_mid.get_output(0))
+            mid_dense.second_transpose = (2, 1, 0, 3)
+        else:
+            mid_dense = network.add_convolution_nd(attention_ln, config.intermediate_size, (1, 1), W_mid, B_mid)
     else:
         mid_dense = network.add_fully_connected(attention_ln, config.intermediate_size, W_mid, B_mid)
 
@@ -233,6 +284,9 @@ def transformer_layer_opt(prefix, config, init_dict, network, input_tensor, resi
     if config.use_int8:
         if config.use_qat:
             dr_gelu = init_dict[prefix + 'output_dense_input_amax']
+            if config.use_cusparselt and not config.plugin_skip_ff1:
+                set_output_range(mid_dense_mid, 127.0)
+                set_output_range(mid_dense, 127.0)
             set_output_range(gelu_layer, dr_gelu)
         else:
             # use gelu10 according to whitepaper http://arxiv.org/abs/2004.09602
@@ -244,11 +298,21 @@ def transformer_layer_opt(prefix, config, init_dict, network, input_tensor, resi
     W_lout = init_dict[prefix + W_LOUT]
 
     if config.use_int8:
-        out_dense = network.add_convolution_nd(intermediate_act, hidden_size, (1, 1), W_lout, B_lout)
+        if config.use_cusparselt:
+            out_dense_prev = network.add_shuffle(intermediate_act)
+            out_dense_prev.second_transpose = (2, 1, 0, 3)
+            set_output_range(out_dense_prev, intermediate_act.dynamic_range[1])
+            out_dense_mid = network.add_plugin_v2([out_dense_prev.get_output(0)], get_spmm_plugin(hidden_size, W_lout, B_lout, 0))
+            out_dense = network.add_shuffle(out_dense_mid.get_output(0))
+            out_dense.second_transpose = (2, 1, 0, 3)
+        else:
+            out_dense = network.add_convolution_nd(intermediate_act, hidden_size, (1, 1), W_lout, B_lout)
     else:
         out_dense = network.add_fully_connected(intermediate_act, hidden_size, W_lout, B_lout)
     if config.use_int8 and config.use_qat:
         dr_fc_out = init_dict[prefix + 'output_add_local_input_quantizer_amax']
+        if config.use_cusparselt:
+            set_output_range(out_dense_mid, dr_fc_out)
         set_output_range(out_dense, dr_fc_out)
     set_output_name(out_dense, prefix + "output_", "dense")
 
@@ -418,6 +482,9 @@ def build_engine(batch_size, workspace_size, sequence_length, config, weights_di
         if config.use_sparsity:
             TRT_LOGGER.log(TRT_LOGGER.INFO, "Setting sparsity flag on builder_config.")
             builder_config.set_flag(trt.BuilderFlag.SPARSE_WEIGHTS)
+        
+        builder_config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
+        builder_config.set_flag(trt.BuilderFlag.OBEY_PRECISION_CONSTRAINTS)
 
         # Create the network
         emb_layer, cu_seqlens, max_seqlen = emb_layernorm(builder, network, config, weights_dict, builder_config, sequence_length, batch_size)
@@ -483,6 +550,7 @@ def main():
     parser.add_argument("-tcf", "--timing-cache-file", help="Path to tensorrt build timeing cache file, only available for tensorrt 8.0 and later", required=False)
     parser.add_argument("-sp", "--sparse", action="store_true", help="Indicates that model is sparse", required=False)
     parser.add_argument("--megatron", action="store_true", help="Indicates that model is the Megatron-style architecture", required=False)
+    parser.add_argument("--fc-mode", required=False, help="The mode can be [condition1|condition2] for cuSPARSELt plugin, or remain empty for built-in FC layer")
 
     args, _ = parser.parse_known_args()
 
@@ -499,7 +567,18 @@ def main():
     bert_config_path = os.path.join(args.config_dir, "bert_config.json")
     TRT_LOGGER.log(TRT_LOGGER.INFO, "Using configuration file: {:}".format(bert_config_path))
 
-    config = BertConfig(bert_config_path, args.fp16, args.int8, args.int8 and (args.onnx or args.pytorch or args.pickle), args.interleaved, args.timing_cache_file, args.sparse, args.megatron)
+    if args.fc_mode == None:
+        use_cusparselt = False
+        plugin_skip_ff1 = True
+    else:
+        assert(args.sparse and "cuSPARSELt plugin only supports sparse weight")
+        use_cusparselt = True
+        if args.fc_mode == "condition1":
+            plugin_skip_ff1 = True
+        else:
+            plugin_skip_ff1 = False
+
+    config = BertConfig(bert_config_path, args.fp16, args.int8, args.int8 and (args.onnx or args.pytorch or args.pickle), args.interleaved, args.timing_cache_file, args.sparse, args.megatron, use_cusparselt, plugin_skip_ff1)
 
     if args.calib_path != None:
         calib_cache = args.calib_path
