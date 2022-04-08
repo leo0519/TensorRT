@@ -62,6 +62,6 @@ bash build_infer.sh condition2 # Condition2
 
 ```bash
 {"exact_match": 84.15, "f1": 91.03}   # Baseline
-{"exact_match": 84.00, "f1": 84.00}   # Condition1
-{"exact_match": 90.86, "f1": 90.87}   # Condition2
+{"exact_match": 84.00, "f1": 90.86}   # Condition1
+{"exact_match": 84.00, "f1": 90.87}   # Condition2
 ```
