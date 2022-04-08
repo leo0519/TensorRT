@@ -98,9 +98,10 @@ RUN cd /tmp && \
 RUN cd /usr/local/bin && wget https://ngc.nvidia.com/downloads/ngccli_cat_linux.zip && unzip ngccli_cat_linux.zip && chmod u+x ngc && rm ngccli_cat_linux.zip ngc.md5 && echo "no-apikey\nascii\n" | ngc config set
 
 # install cuSPARSELt-0.2.0
+COPY libcusparse_lt_0.3.0.1_test.tar.gz /tmp
 RUN cd /tmp && \
-    wget https://developer.download.nvidia.com/compute/libcusparse-lt/0.2.0/local_installers/libcusparse_lt-linux-x86_64-0.2.0.1.tar.gz && \
-    tar -zxvf libcusparse_lt-linux-x86_64-0.2.0.1.tar.gz -C /
+    tar -zxvf libcusparse_lt_0.3.0.1_test.tar.gz -C / && \
+    mv /libcusparse_lt_0.3.0.1_test /libcusparse_lt
 
 # Set environment and working directory
 ENV TRT_LIBPATH /usr/lib/x86_64-linux-gnu

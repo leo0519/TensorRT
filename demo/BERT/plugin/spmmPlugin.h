@@ -50,10 +50,10 @@ class SpmmPluginDynamic : public nvinfer1::IPluginV2DynamicExt {
                     const nvinfer1::Weights& bias, Activation activation);
   // The second constructor is for clone member function
   SpmmPluginDynamic(const std::string& name, const nvinfer1::DataType precision,
-                    const int out_dim, const int k, const void* weight,
+                    const int out_dim, const int k, const void* weight_scale, const void* weight,
                     size_t compressed_size, const void* bias,
                     bool is_configured, const int m_max, const int optim_alg,
-                    Activation activation);
+                    Activation activation, float gelu_scale);
   SpmmPluginDynamic(const std::string name, const void* data, size_t length);
   SpmmPluginDynamic() = delete;
   nvinfer1::IPluginV2DynamicExt* clone() const noexcept override;
@@ -106,7 +106,7 @@ class SpmmPluginDynamic : public nvinfer1::IPluginV2DynamicExt {
     float relu_upper_bound{0};
     float relu_threshold{0};
     void init(int m, int n, int k, cudaDataType_t type, void* bias_ptr,
-                SpmmPluginDynamic::Activation activation);
+                SpmmPluginDynamic::Activation activation, float gelu_scale);
     void setAlgo(int id);
     void destroy();
     void compressMatB(int n, int k, cudaDataType_t type, void* src, void** dest,
@@ -122,7 +122,8 @@ class SpmmPluginDynamic : public nvinfer1::IPluginV2DynamicExt {
   int m_max_;
   bool is_configured_;           // already get m, scale bias, and search the optim alg or not
   int optim_alg_;                // the index of optimal algorithm
-  float weight_scale_;           // record the weight scale from constructor
+  void* weight_scale_;           // record the weight scale from constructor
+  void* weight_scale_dev_;
   void* weight_compressed_;      // host compressed weight
   void* weight_compressed_dev_;  // device compressed weight
   size_t compressed_size_;       // size of compressed weight
@@ -131,6 +132,7 @@ class SpmmPluginDynamic : public nvinfer1::IPluginV2DynamicExt {
   void* bias_dev_;               // device bias
   Activation activation_;        // record the activation type
   cusparseLtContext spmm_context_;
+  float gelu_scale_;
 };  // class SpmmPluginDynamic
 
 class SpmmPluginDynamicCreator : public nvinfer1::IPluginCreator {

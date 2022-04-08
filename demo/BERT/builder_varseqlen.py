@@ -269,15 +269,16 @@ def transformer_layer_opt(prefix, config, init_dict, network, input_tensor, resi
             mid_dense_prev = network.add_shuffle(attention_ln)
             mid_dense_prev.second_transpose = (2, 1, 0, 3)
             set_output_range(mid_dense_prev, attention_ln.dynamic_range[1])
-            mid_dense_mid = network.add_plugin_v2([mid_dense_prev.get_output(0)], get_spmm_plugin(config.intermediate_size, W_mid, B_mid, 0))
+            mid_dense_mid = network.add_plugin_v2([mid_dense_prev.get_output(0)], get_spmm_plugin(config.intermediate_size, W_mid, B_mid, 2))
             mid_dense = network.add_shuffle(mid_dense_mid.get_output(0))
             mid_dense.second_transpose = (2, 1, 0, 3)
+            gelu_layer = mid_dense
         else:
             mid_dense = network.add_convolution_nd(attention_ln, config.intermediate_size, (1, 1), W_mid, B_mid)
+            gelu_layer = add_gelu(network, mid_dense.get_output(0))
     else:
         mid_dense = network.add_fully_connected(attention_ln, config.intermediate_size, W_mid, B_mid)
-
-    gelu_layer = add_gelu(network, mid_dense.get_output(0))
+        gelu_layer = add_gelu(network, mid_dense.get_output(0))
 
     intermediate_act = gelu_layer.get_output(0)
     set_tensor_name(intermediate_act, prefix, "gelu")
@@ -285,9 +286,10 @@ def transformer_layer_opt(prefix, config, init_dict, network, input_tensor, resi
         if config.use_qat:
             dr_gelu = init_dict[prefix + 'output_dense_input_amax']
             if config.use_cusparselt and not config.plugin_skip_ff1:
-                set_output_range(mid_dense_mid, 127.0)
-                set_output_range(mid_dense, 127.0)
-            set_output_range(gelu_layer, dr_gelu)
+                set_output_range(mid_dense_mid, dr_gelu)
+                set_output_range(mid_dense, dr_gelu)
+            else:
+                set_output_range(gelu_layer, dr_gelu)
         else:
             # use gelu10 according to whitepaper http://arxiv.org/abs/2004.09602
             set_output_range(gelu_layer, 10)
