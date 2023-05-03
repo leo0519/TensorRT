@@ -61,7 +61,10 @@ skln_plg_creator3 = plg_registry.get_plugin_creator("CustomSkipLayerNormPluginDy
 emln_plg_creator3 = plg_registry.get_plugin_creator("CustomEmbLayerNormPluginDynamic", "3", "")
 skln_plg_creator4 = plg_registry.get_plugin_creator("CustomSkipLayerNormPluginDynamic", "4", "")
 
-use_int8_skln = True
+if os.environ.get('SKLN_INT8') == 'TRUE':
+    use_int8_skln = True
+else:
+    use_int8_skln = False
 
 class BertConfig:
     def __init__(self, bert_config_path, use_fp16, use_int8, use_qat, interleaved, timing_cache, use_sparsity, use_megatron):
