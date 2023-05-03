@@ -61,6 +61,8 @@ skln_plg_creator3 = plg_registry.get_plugin_creator("CustomSkipLayerNormPluginDy
 emln_plg_creator3 = plg_registry.get_plugin_creator("CustomEmbLayerNormPluginDynamic", "3", "")
 skln_plg_creator4 = plg_registry.get_plugin_creator("CustomSkipLayerNormPluginDynamic", "4", "")
 
+use_int8_skln = True
+
 class BertConfig:
     def __init__(self, bert_config_path, use_fp16, use_int8, use_qat, interleaved, timing_cache, use_sparsity, use_megatron):
         with open(bert_config_path, "r") as f:
@@ -122,7 +124,8 @@ def attention_layer_opt(prefix, config, init_dict, network, input_tensor, mask_i
     set_output_name(mult_all, prefix, "qkv_mult")
 
     # QKV2CTX
-    dtype = config.get_trt_dtype()
+    # dtype = config.get_trt_dtype()
+    dtype = trt.float16
 
     pf_type = trt.PluginField("type_id", np.array([int(dtype)], np.int32), trt.PluginFieldType.INT32)
     pf_hidden_size = trt.PluginField("hidden_size", np.array([hidden_size], np.int32), trt.PluginFieldType.INT32)
@@ -163,7 +166,11 @@ def skipln(prefix, config, init_dict, network, input_tensor, skip, is_last_skipl
     Add the skip layer
     """
     hidden_size = config.hidden_size
-    dtype = config.get_trt_dtype()
+    # dtype = config.get_trt_dtype()
+    if use_int8_skln:
+        dtype = trt.int8
+    else:
+        dtype = trt.float16
 
     pf_ld = trt.PluginField("ld", np.array([hidden_size], np.int32), trt.PluginFieldType.INT32)
     wbeta = init_dict[prefix + "beta"]
